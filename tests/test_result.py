@@ -11,17 +11,6 @@ CSV_PATH = os.path.join(PROJECT_ROOT, "ResalePricesSingapore.csv")
 MAIN_PY = os.path.join(PROJECT_ROOT, "main.py")
 
 
-@pytest.fixture(autouse=True)
-def cleanup_scan_results():
-    """Remove any ScanResult files after each test."""
-    yield
-    for f in glob.glob(os.path.join(PROJECT_ROOT, "ScanResult_*.csv")):
-        try:
-            os.remove(f)
-        except FileNotFoundError:
-            pass
-
-
 def run_main(matric: str, analysis: bool = False):
     cmd = ["python", MAIN_PY, CSV_PATH, matric]
     if analysis:
@@ -38,6 +27,19 @@ def read_scan_result(matric: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+@pytest.fixture(scope="session")
+def scan_rows():
+    """Run main.py once and return the parsed ScanResult rows for all tests."""
+    run_main("U2220031B")
+    rows = read_scan_result("U2220031B")
+    yield rows
+    for f in glob.glob(os.path.join(PROJECT_ROOT, "ScanResult_*.csv")):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+
+
 class TestMatricParsing:
     def test_invalid_matric_rejected(self):
         result = subprocess.run(
@@ -46,45 +48,41 @@ class TestMatricParsing:
         )
         assert result.returncode != 0
 
-    def test_valid_matric_runs(self):
-        run_main("U2220031B")
+    def test_valid_matric_runs(self, scan_rows):
+        assert len(scan_rows) > 0
 
 
 class TestScanResultFormat:
-    @pytest.fixture(autouse=True)
-    def run_scan(self):
-        run_main("U2220031B")
-        self.rows = read_scan_result("U2220031B")
 
-    def test_csv_has_expected_columns(self):
+    def test_csv_has_expected_columns(self, scan_rows):
         expected = [
             "(x, y)", "Year", "Month", "Town", "Block",
             "Floor_Area", "Flat_Model", "Lease_Commence_Date",
             "Price_Per_Square_Meter",
         ]
-        assert list(self.rows[0].keys()) == expected
+        assert list(scan_rows[0].keys()) == expected
 
-    def test_has_results(self):
-        assert len(self.rows) > 0
+    def test_has_results(self, scan_rows):
+        assert len(scan_rows) > 0
 
-    def test_xy_format(self):
-        for row in self.rows:
+    def test_xy_format(self, scan_rows):
+        for row in scan_rows:
             xy = row["(x, y)"]
             assert xy.startswith("(") and xy.endswith(")")
 
-    def test_price_per_sqm_within_threshold(self):
-        for row in self.rows:
+    def test_price_per_sqm_within_threshold(self, scan_rows):
+        for row in scan_rows:
             ppsqm = int(row["Price_Per_Square_Meter"])
             assert ppsqm <= 4725
 
-    def test_x_range(self):
-        for row in self.rows:
+    def test_x_range(self, scan_rows):
+        for row in scan_rows:
             xy = row["(x, y)"].strip("()")
             x = int(xy.split(",")[0].strip())
             assert 1 <= x <= 8
 
-    def test_y_range(self):
-        for row in self.rows:
+    def test_y_range(self, scan_rows):
+        for row in scan_rows:
             xy = row["(x, y)"].strip("()")
             y = int(xy.split(",")[1].strip())
             assert 80 <= y <= 150
