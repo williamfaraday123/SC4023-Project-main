@@ -1,213 +1,239 @@
-import sys
-import os
+import argparse
 import csv
+import math
+import re
 
-from constants import assignment_towns, town, flat_type, storey_range, flat_model
-from store import ColumnStore
-from query import QueryHelper
-from Mapping.default_mappings import *
-from Mapping.enum_mappings import *
-from Mapping.special_mappings import *
+from columnstore.storage import DiskColumnStore
+from columnstore.engine import ScanEngine
+from columnstore.catalog import (
+    MATRIC_DIGIT_TO_TOWN, ALL_TOWNS, ALL_FLAT_TYPES,
+    ALL_STOREY_RANGES, ALL_FLAT_MODELS,
+)
+from columnstore.encoding import (
+    MonthEncoder, TownEncoder, FlatTypeEncoder, BlockIdEncoder,
+    FixedStringEncoder, StoreyRangeEncoder, Float32Encoder,
+    FlatModelEncoder, UInt16Encoder,
+)
 
-def perform_analysis(analysis_store: ColumnStore, sorted_analysis: bool = True):
-    """Perform full analysis on a given store"""
-    analysis_store.flush_write_buffers()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="SC4023 Column Store Project")
+    parser.add_argument("csv_path", help="Path to ResalePricesSingapore.csv")
+    parser.add_argument("matric", help="Matriculation number (e.g., U2220031B)")
+    parser.add_argument("--analysis", action="store_true",
+                        help="Run demo analysis with block read counts")
+    return parser.parse_args()
+
+
+def parse_matric(matric: str):
+    """
+    Extracts query parameters from a matriculation number.
+    Returns (year, start_month_encoded, list_of_town_names).
+    """
+    pattern = re.compile(r"[A-Z][0-9]{7}[A-Z]")
+    if not re.match(pattern, matric):
+        raise ValueError("Invalid Matric format. Should be A1234567B")
+
+    # Target year: last digit + 2010, wrap to 2020s if before 2014
+    year = int(matric[-2]) + 2010
+    if year < 2014:
+        year += 10
+
+    # Starting month: second-last digit maps 1-9 directly, 0 means October
+    month_digit = int(matric[-3])
+    month_number = 10 if month_digit == 0 else month_digit
+
+    # Encode as (year * 12 + month - 1) for the column store month format
+    month_enc = MonthEncoder()
+    month_str = month_enc.MONTH_NAMES[month_number - 1]
+    start_month = month_enc.encode(f"{month_str}-{str(year % 100).zfill(2)}")
+
+    # Towns from ALL digits in the matric number (deduplicated, order preserved)
+    digits = [int(ch) for ch in matric if ch.isdigit()]
+    seen = set()
+    town_names = []
+    for d in digits:
+        name = MATRIC_DIGIT_TO_TOWN[d]
+        if name not in seen:
+            seen.add(name)
+            town_names.append(name)
+
+    return year, start_month, town_names
+
+
+def build_store(csv_path: str, encoders: list, critical: list,
+                sort: bool = False, basic: bool = False):
+    """Loads CSV data into a DiskColumnStore. Optionally sorts by (month, town, area)."""
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.reader(f)
+        columns = next(reader)
+        rows = list(reader)
+
+    # Sort by (month, town, floor_area) to improve zone map effectiveness
+    if sort:
+        rows.sort(key=lambda row: (row[0], row[1], row[6]))
+
+    store = DiskColumnStore(columns=columns, encoders=encoders, critical=critical, basic=basic)
+    for row in rows:
+        try:
+            store.add_entry(row)
+        except Exception as e:
+            print(f"Row {row}: {type(e).__name__} -> {e}. Skipping...")
+
+    store.flush_write_buffers()
+    return store
+
+
+def run_analysis(store: DiskColumnStore, start_month: int, town_encoded: int, matric: str):
+    """Runs the demo analysis: basic store stats, filter permutations, shared scans, etc."""
     print("\n---------COMPRESSED STORE---------")
-    analysis_store.print_storage_stats()
+    store.print_storage_stats()
 
-    print(
-        f"\n\nRunning queries for {TOWN_NAME} from months {int(MATRIC[-3])} to {int(MATRIC[-3])+1} in {YEAR}"
-    )
-
-    # Run different filter permutations to analyze block read impact
-    if sorted_analysis:
-        print("\n---------FILTER PERMUTATIONS (ZM OFF; IDX OFF)---------")
-        analysis_query = QueryHelper(store=analysis_store)
-        analysis_query.test_filter_permutations(MONTH, TOWN, False, False)
-
-        print("\n---------FILTER PERMUTATIONS (ZM ON; IDX OFF)---------")
-        analysis_query = QueryHelper(store=analysis_store)
-        analysis_query.test_filter_permutations(MONTH, TOWN, True, False)
+    month_enc = store.encoders[0]
+    month_str = month_enc.decode(start_month)
+    month_name, year_suffix = month_str.split("-")
+    town_name = store.decode_town(town_encoded)
+    print(f"\n\nRunning queries for {town_name} from month {month_name} in 20{year_suffix}")
 
     print("\n---------FILTER PERMUTATIONS (ZM OFF; IDX ON)---------")
-    analysis_query = QueryHelper(store=analysis_store)
-    analysis_query.test_filter_permutations(MONTH, TOWN, False, True)
+    engine = ScanEngine(store=store)
+    engine.test_filter_permutations(start_month, town_encoded, False, True)
 
     print("\n---------FILTER PERMUTATIONS (ZM ON; IDX ON)---------")
-    analysis_query = QueryHelper(store=analysis_store)
-    analysis_query.test_filter_permutations(MONTH, TOWN, True, True)
+    engine = ScanEngine(store=store)
+    engine.test_filter_permutations(start_month, town_encoded, True, True)
 
-    # Run and analyze block read for individual scans
-    if sorted_analysis:
-        reads = 0
-        print("\n---------INDIVIDUAL SCANS---------")
-        analysis_query.minimum_price(MONTH, TOWN)
-        reads += analysis_store.reads
-        print(f"{analysis_store.reads} block reads for min price")
-
-        analysis_query.average_price(MONTH, TOWN)
-        reads += analysis_store.reads
-        print(f"{analysis_store.reads} block reads for avg price")
-
-        analysis_query.stddev_price(MONTH, TOWN)
-        reads += analysis_store.reads
-        print(f"{analysis_store.reads} block reads for stddev price")
-
-        analysis_query.minimum_price_per_sqm(MONTH, TOWN)
-        reads += analysis_store.reads
-        print(f"{analysis_store.reads} block reads for min price/sqm")
-        print(f"{reads} total block reads")
-
-        analysis_results = analysis_query.get_results()
-        with open(f"ScanResult_{MATRIC}.csv", "w") as g:
-            g.write(analysis_results)
-        print(analysis_results)
-
-        analysis_query.clear_results()
-
-    # Run and analyze block read for shared scans
     print("\n---------SHARED SCANS---------")
-    analysis_query.shared_scan(MONTH, TOWN)
-    print(f"{analysis_store.reads} block reads")
-    print(analysis_query.get_results())
+    engine.shared_scan(start_month, town_encoded)
+    print(f"{store.reads} block reads")
+    print(engine.get_results())
 
-    analysis_query.clear_results()
+    engine.clear_results()
 
-    # Run and analyze block read for vector-at-a-time
-    if sorted_analysis:
-        print("\n---------VECTOR AT A TIME---------")
-        analysis_query.vector_a_time(MONTH, TOWN)
-        print(f"{analysis_store.reads} block reads")
-        print(analysis_query.get_results())
+    print("\n---------VECTOR AT A TIME---------")
+    engine.vector_a_time(start_month, town_encoded)
+    print(f"{store.reads} block reads")
+    print(engine.get_results())
 
-    analysis_store.clear_disk()
 
-# Check command-line arguments
-if len(sys.argv) != 3:
-    print("Usage: python3 main.py <CSV file> <Matric>")
-    sys.exit(1)
+def generate_scan_result(store: DiskColumnStore, matric: str,
+                         start_month: int, town_names: list[str]):
+    """
+    Generates ScanResult_<Matric>.csv by iterating all (x, y) pairs.
+    x = month span [1..8], y = min area [80..150].
+    For each valid (x, y), finds the record with minimum price/sqm <= 4725.
+    """
+    town_enc = store.encoders[1]
+    towns_encoded = [town_enc.encode(t) for t in town_names]
+    engine = ScanEngine(store=store)
 
-DATAFILE = sys.argv[1]
-if not os.path.isfile(DATAFILE):
-    print(f"{DATAFILE} not found!")
-    sys.exit(1)
+    # x = month span (how many months to look back)
+    # y = minimum floor area in sqm
+    rows = []
+    for x in range(1, 9):
+        for y in range(80, 151):
+            best_pos = None
+            best_ppsqm = math.inf
 
-MATRIC = sys.argv[2]
-pattern = re.compile(r'[A-Z][0-9]{7}[A-Z]')
-if not re.match(pattern=pattern, string=MATRIC):
-    print("Invalid Matric format. Should be A1234567B")
-    sys.exit(1)
+            for town_idx in towns_encoded:
+                store.clear_read_state()
+                positions = engine.apply_filters(
+                    start_month, town_idx, 0, store.get_size(),
+                    month_span=x, min_area=y,
+                )
+                if not positions:
+                    continue
 
-# Map values
-townMapper = TownMapper(town)
+                pos, ppsqm = engine.find_min_price_per_sqm_record(positions)
+                if ppsqm < best_ppsqm:
+                    best_ppsqm = ppsqm
+                    best_pos = pos
 
-TOWN_NAME = assignment_towns[int(MATRIC[-4])]
-TOWN = townMapper.map_value(TOWN_NAME)
+            if best_pos is not None and best_ppsqm <= 4725:
+                rec = engine.get_record_details(best_pos)
+                rows.append([
+                    f"({x}, {y})",
+                    rec["year"],
+                    rec["month"],
+                    rec["town"],
+                    rec["block"],
+                    rec["floor_area"],
+                    rec["flat_model"],
+                    rec["lease_commence_date"],
+                    round(best_ppsqm),
+                ])
 
-monthMapper = MonthMapper()
-floatMapper = FloatMapper()
-shortMapper = ShortMapper()
+    output_path = f"ScanResult_{matric}.csv"
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "(x, y)", "Year", "Month", "Town", "Block",
+            "Floor_Area", "Flat_Model", "Lease_Commence_Date",
+            "Price_Per_Square_Meter",
+        ])
+        writer.writerows(rows)
 
-YEAR = int(MATRIC[-2]) + 2010
-if YEAR < 2014:
-    YEAR += 10
+    print(f"\nScanResult written to {output_path} ({len(rows)} records)")
 
-month_number = 10 if f"0{MATRIC[-3]}" == "00" else int(f"0{MATRIC[-3]}")
-month_str = monthMapper.month_names[month_number - 1]
-MONTH = monthMapper.map_value(f"{month_str}-{str(YEAR % 100).zfill(2)}")
 
-print("Loading data")
+if __name__ == "__main__":
+    args = parse_args()
 
-# Define mappings for basic and compressed stores
-basic_mappings = [
-    CharMapper(7),
-    CharMapper(15),
-    CharMapper(16),
-    CharMapper(5),
-    CharMapper(20),
-    CharMapper(12),
-    floatMapper,
-    CharMapper(22),
-    shortMapper,
-    floatMapper,
-]
+    # Validate matric
+    year, start_month, town_names = parse_matric(args.matric)
+    print(f"Matric: {args.matric}")
+    print(f"Year: {year}, Towns: {town_names}")
+    print("Loading data...")
 
-compressed_mappings = [
-    monthMapper,
-    townMapper,
-    FlatTypeMapper(flat_type),
-    BlockMapper(),
-    CharMapper(20),
-    StoreyRangeMapper(storey_range),
-    floatMapper,
-    FlatModelMapper(flat_model),
-    shortMapper,
-    floatMapper,
-]
+    # Encoders for the compressed column store
+    month_enc = MonthEncoder()
+    float_enc = Float32Encoder()
+    short_enc = UInt16Encoder()
 
-# Define columns that must not be empty
-critical = [0, 1, 6, 9]
+    compressed_encoders = [
+        month_enc,                              # 0: month
+        TownEncoder(ALL_TOWNS),                 # 1: town
+        FlatTypeEncoder(ALL_FLAT_TYPES),         # 2: flat_type
+        BlockIdEncoder(),                       # 3: block
+        FixedStringEncoder(20),                 # 4: street_name
+        StoreyRangeEncoder(ALL_STOREY_RANGES),  # 5: storey_range
+        float_enc,                              # 6: floor_area_sqm
+        FlatModelEncoder(ALL_FLAT_MODELS),       # 7: flat_model
+        short_enc,                              # 8: lease_commence_date
+        float_enc,                              # 9: resale_price
+    ]
 
-# Experiments on column store
-with open(DATAFILE, "r", newline="") as f:
+    # Columns where empty values are not allowed
+    critical = [0, 1, 6, 9]
+
+    # Build basic store for stats comparison
     print("\n---------BASIC STORE---------")
-    reader = csv.reader(f)
-    columns = next(reader)
-    basic_store = ColumnStore(
-        columns=columns, mappings=basic_mappings, critical=critical, basic=True
-    )
-    for row in reader:
-        try:
-            basic_store.add_entry(row)
-        except Exception as s:
-            print(
-                f"Row {row} (columns={len(row)}):",
-                type(s).__name__,
-                " -> ",
-                str(s),
-                "Skipping...",
-            )
-    basic_store.flush_write_buffers()
+    basic_encoders = [
+        FixedStringEncoder(7),   # month
+        FixedStringEncoder(15),  # town
+        FixedStringEncoder(16),  # flat_type
+        FixedStringEncoder(5),   # block
+        FixedStringEncoder(20),  # street_name
+        FixedStringEncoder(12),  # storey_range
+        float_enc,               # floor_area_sqm
+        FixedStringEncoder(22),  # flat_model
+        short_enc,               # lease_commence_date
+        float_enc,               # resale_price
+    ]
+    basic_store = build_store(args.csv_path, basic_encoders, critical, basic=True)
     basic_store.print_storage_stats()
     basic_store.clear_disk()
 
-with open(DATAFILE, "r", newline="") as f:
-    reader = csv.reader(f)
-    columns = next(reader)
-    store = ColumnStore(
-        columns=columns, mappings=compressed_mappings, critical=critical
-    )
-    sorted_rows = []
-    for row in reader:
-        raw_row = row.copy()
-        try:
-            store.add_entry(row)
-            sorted_rows.append(raw_row)
-        except Exception as s:
-            print(
-                f"Row {row} (columns={len(row)}):",
-                type(s).__name__,
-                " -> ",
-                str(s),
-                "Skipping...",
-            )
+    # Build compressed sorted store
+    store = build_store(args.csv_path, compressed_encoders, critical, sort=True)
 
-    print("\n=========WITHOUT SORTING=========")
-    perform_analysis(store, False)
+    # Generate the required ScanResult CSV
+    generate_scan_result(store, args.matric, start_month, town_names)
 
-    store_sorted = ColumnStore(
-        columns=columns, mappings=compressed_mappings, critical=critical
-    )
+    # Optional analysis demo
+    if args.analysis:
+        town_enc = store.encoders[1]
+        first_town_encoded = town_enc.encode(town_names[0])
+        run_analysis(store, start_month, first_town_encoded, args.matric)
 
-    sorted_rows.sort(key=lambda row: (row[0], row[1], row[6]))
-    for sorted_row in sorted_rows:
-        try:
-            store_sorted.add_entry(sorted_row)
-        except Exception as s:
-            print(f"Line {sorted_row}:", type(s).__name__, " -> ", str(s), "Skipping...")
-
-    print("\n=========WITH SORTING=========")
-    perform_analysis(store_sorted)
-
-if __name__ == '__main__':
-    pass
+    store.clear_disk()
