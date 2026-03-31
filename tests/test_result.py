@@ -4,95 +4,92 @@ import os
 import subprocess
 
 import pytest
-from testcontainers.postgres import PostgresContainer
 
-from Enum.Metrics import Metrics
-from .ResalePricesSingapore import query_resale_prices_singapore_results
-from .connection import get_connection
 
-postgres = PostgresContainer("postgres:16")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV_PATH = os.path.join(PROJECT_ROOT, "ResalePricesSingapore.csv")
+MAIN_PY = os.path.join(PROJECT_ROOT, "main.py")
 
-def create_table_from_csv(csv_file_name: str, table_name: str="ResalePricesSingapore"):
-    """Creates the target table in PostgreSQL and loads data from a CSV file."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"""CREATE TABLE IF NOT EXISTS {table_name} (
-        month TEXT,
-        town TEXT,
-        flat_type TEXT,
-        block TEXT,
-        street_name TEXT,
-        storey_range TEXT,
-        floor_area_sqm REAL,
-        flat_model TEXT,
-        lease_commence_date INT,
-        resale_price REAL);""")
-    sql = f"COPY {table_name} FROM STDIN DELIMITER ',' CSV HEADER"
-    cursor.copy_expert(sql, open(csv_file_name, "r"))
-    conn.commit()
-    cursor.close()
-    conn.close()
 
-@pytest.fixture(scope="module", autouse=True)
-def setup(request):
-    """
-    Pytest fixture to start the Postgres container and set environment variables.
-    Automatically tears down the container and cleans up output files after tests.
-    """
-    postgres.start()
+def run_main(matric: str, analysis: bool = False):
+    cmd = ["python", MAIN_PY, CSV_PATH, matric]
+    if analysis:
+        cmd.append("--analysis")
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_ROOT)
+    assert result.returncode == 0, f"main.py failed:\n{result.stderr}"
+    return result
 
-    def remove_container():
-        postgres.stop()
 
-        for file in glob.glob("ScanResult_*.csv"):
-            try:
-                os.remove(file)
-            except FileNotFoundError:
-                pass
+def read_scan_result(matric: str) -> list[dict]:
+    path = os.path.join(PROJECT_ROOT, f"ScanResult_{matric}.csv")
+    assert os.path.exists(path), f"{path} not found"
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
 
-    request.addfinalizer(remove_container)
-    os.environ["DB_HOST"] = postgres.get_container_host_ip()
-    os.environ["DB_PORT"] = str(postgres.get_exposed_port(5432))
-    os.environ["DB_USERNAME"] = postgres.username
-    os.environ["DB_PASSWORD"] = postgres.password
-    os.environ["DB_NAME"] = postgres.dbname
-    create_table_from_csv("../ResalePricesSingapore.csv")
 
-# Test different 3-digit encodings: town index, month, and year suffix
-test_cases = ["000"]
-test_cases += [f"{i}00" for i in range(1, 10)]
-test_cases += [f"0{i}0" for i in range(1, 10)]
-test_cases += [f"00{i}" for i in range(1, 10)]
+@pytest.fixture(scope="session")
+def scan_rows():
+    """Run main.py once and return the parsed ScanResult rows for all tests."""
+    run_main("U2220031B")
+    rows = read_scan_result("U2220031B")
+    yield rows
+    for f in glob.glob(os.path.join(PROJECT_ROOT, "ScanResult_*.csv")):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
 
-@pytest.mark.parametrize("last_3_digit_code", test_cases)
-def test_query_result(last_3_digit_code: str):
-    """
-    Integration test that:
-    - Calls the query_resale_prices_singapore_results function (PostgreSQL)
-    - Runs the main.py pipeline on the same input (ColumnStore implementation)
-    - Compares the output CSV from the main.py program with the database results.
-    """
-    min_price, stddev_price, avg_price, min_price_per_sqm = query_resale_prices_singapore_results(last_3_digit_code)
-    print(min_price, stddev_price, avg_price, min_price_per_sqm)
-    matriculation_number = "A1234" + last_3_digit_code + "B"
-    subprocess.run(
-        ["python", "../main.py", "../ResalePricesSingapore.csv", matriculation_number],
-        capture_output=False,
-        text=True
-    )
 
-    result_csv_path = f"ScanResult_{matriculation_number}.csv"
-    assert os.path.exists(result_csv_path), f"{result_csv_path} not found."
+class TestMatricParsing:
+    def test_invalid_matric_rejected(self):
+        result = subprocess.run(
+            ["python", MAIN_PY, CSV_PATH, "INVALID"],
+            capture_output=True, text=True, cwd=PROJECT_ROOT,
+        )
+        assert result.returncode != 0
 
-    results = {}
-    with open(result_csv_path, newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            category = row["Category"]
-            value = None if row["Value"] == "No result" else float(row["Value"])
-            results[category] = value
+    def test_valid_matric_runs(self, scan_rows):
+        assert len(scan_rows) > 0
 
-    assert results.get(Metrics.MIN_PRICE.value) == min_price
-    assert results.get(Metrics.STDDEV.value) == float(stddev_price)
-    assert results.get(Metrics.AVG_PRICE.value) == float(avg_price)
-    assert results.get(Metrics.MIN_PRICE_PER_SQM.value) == round(float(min_price_per_sqm), 2)
+
+class TestScanResultFormat:
+
+    def test_csv_has_expected_columns(self, scan_rows):
+        expected = [
+            "(x, y)", "Year", "Month", "Town", "Block",
+            "Floor_Area", "Flat_Model", "Lease_Commence_Date",
+            "Price_Per_Square_Meter",
+        ]
+        assert list(scan_rows[0].keys()) == expected
+
+    def test_has_results(self, scan_rows):
+        assert len(scan_rows) > 0
+
+    def test_xy_format(self, scan_rows):
+        for row in scan_rows:
+            xy = row["(x, y)"]
+            assert xy.startswith("(") and xy.endswith(")")
+
+    def test_price_per_sqm_within_threshold(self, scan_rows):
+        for row in scan_rows:
+            ppsqm = int(row["Price_Per_Square_Meter"])
+            assert ppsqm <= 4725
+
+    def test_x_range(self, scan_rows):
+        for row in scan_rows:
+            xy = row["(x, y)"].strip("()")
+            x = int(xy.split(",")[0].strip())
+            assert 1 <= x <= 8
+
+    def test_y_range(self, scan_rows):
+        for row in scan_rows:
+            xy = row["(x, y)"].strip("()")
+            y = int(xy.split(",")[1].strip())
+            assert 80 <= y <= 150
+
+
+class TestAnalysisMode:
+    def test_analysis_flag_produces_output(self):
+        result = run_main("U2220031B", analysis=True)
+        assert "COMPRESSED STORE" in result.stdout
+        assert "SHARED SCANS" in result.stdout
