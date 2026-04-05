@@ -1,7 +1,5 @@
 # SC4023 Project
 
-Column-oriented storage and query engine for Singapore HDB resale flat data.
-
 ## Setup
 
 ```bash
@@ -22,9 +20,17 @@ python main.py ResalePricesSingapore.csv $MATRIC_NUMBER --analysis
 
 The `--analysis` flag runs additional demos after generating the ScanResult CSV. It compares block read counts across filter permutations (with and without zone maps), shared scans, and vector-at-a-time processing.
 
-## Filter order
+## Query execution
 
-Queries filter in a fixed order: month, then town, then area. Month is filtered first because it has a block-level index that can skip non-matching blocks without reading from disk. Town is filtered next using a per-block bitmask zone map. Area is filtered last as it requires reading actual values. This puts the cheapest filters first to reduce the number of records before hitting disk. Data is also sorted by (month, town, area) at load time to maximize the effectiveness of these acceleration structures.
+Each column is stored in 4KB blocks on disk. Filters run in a fixed order chosen to skip as many blocks as possible before touching disk:
+
+1. **Month** — a per-block min/max index records which month range each block covers. Blocks outside the target range are skipped entirely without a disk read.
+2. **Town** — a per-block bitmask (one bit per town) records which towns appear in each block. Blocks with no overlap with the target towns are skipped by checking the bitmask only.
+3. **Area** — requires reading actual floor area values from disk. Applied last, after the two cheaper filters have reduced the number of blocks to scan.
+
+Data is sorted by (month, town, area) at load time to cluster related records into the same blocks, maximising the effectiveness of the above skips.
+
+The ground truth implementation in `tests/ground_truth.py` runs the same query as a plain Python loop over the raw CSV — no index, no zone maps, no block structure, every row examined. Both approaches must produce identical results.
 
 ## Output
 
@@ -33,8 +39,14 @@ Queries filter in a fixed order: month, then town, then area. Month is filtered 
 ## Tests
 
 ```bash
+# Run all tests
 pytest -v tests/
+
+# Run ground truth comparison with printed output
+pytest -v -s tests/test_result.py::TestGroundTruth
 ```
+
+`TestGroundTruth` compares the column store output row-by-row against the plain Python reference for the same matric number and prints a sample of matched rows.
 
 ## Project Structure
 
@@ -49,10 +61,11 @@ columnstore/
   encoding/
     base.py                     FieldEncoder base class
     primitives.py               Float32, FixedString, UInt16 encoders
-    categorical.py              Categorical encoders (town, flat type, etc.)
+    categorical.py              Categorical encoders (town, flat type, street name, etc.)
     temporal.py                 Month and block ID encoders
 tests/
   test_result.py                Integration tests
+  ground_truth.py               Plain Python reference implementation for result verification
 ResalePricesSingapore.csv       Input data
 docs/                           Project description
 ```
