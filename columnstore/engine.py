@@ -86,7 +86,7 @@ class ScanEngine:
         """Composite filter: month range -> town -> area."""
         pos = self.filter_by_month(range(start_idx, stop_idx), start_month, month_span, True)
         pos = self.filter_by_town(pos, town, True)
-        pos = self.filter_by_area(pos, min_area)
+        pos = self.filter_by_area(pos, min_area, True)
         return pos
 
     # ── Analysis helpers (demo / permutation testing) ──────────────
