@@ -18,19 +18,17 @@ python main.py ResalePricesSingapore.csv $MATRIC_NUMBER
 python main.py ResalePricesSingapore.csv $MATRIC_NUMBER --analysis
 ```
 
-The `--analysis` flag runs additional demos after generating the ScanResult CSV. It compares page read counts across filter permutations (with and without zone maps), shared scans, and vector-at-a-time processing.
+The `--analysis` flag runs additional demos: filter permutation comparison, shared scans, and vector-at-a-time processing.
 
 ## Query execution
 
-Each column is stored in 4KB pages on disk. Filters run in a fixed order chosen to skip as many pages as possible before touching disk:
+Each column is stored in 4KB pages on disk. Filters run in order to skip as many pages as possible:
 
-1. **Month** — a per-page min/max index records which month range each page covers. Pages outside the target range are skipped entirely without a disk read.
-2. **Town** — a per-page bitmask (one bit per town) records which towns appear in each page. Pages with no overlap with the target towns are skipped by checking the bitmask only.
-3. **Area** — requires reading actual floor area values from disk. Applied last, after the two cheaper filters have reduced the number of pages to scan.
+1. **Month** — page-level index maps each page to its month range. Pages outside the target range are skipped.
+2. **Town** — page-level bitmask (one bit per town). Pages with no matching towns are skipped.
+3. **Area** — reads floor area values from disk. Applied last after the cheaper filters reduce the scan set.
 
-Data is sorted by (month, town, area) at load time to cluster related records into the same pages, maximising the effectiveness of the above skips.
-
-The ground truth implementation in `tests/ground_truth.py` runs the same query as a plain Python loop over the raw CSV — no index, no zone maps, no page structure, every row examined. Both approaches must produce identical results.
+Data is sorted by (month, town, area) at load time to cluster related records into the same pages.
 
 ## Output
 
@@ -49,7 +47,7 @@ TEST_MATRIC=U2220031B pytest -v tests/
 pytest -v -s tests/test_result.py::TestGroundTruth
 ```
 
-`TestGroundTruth` compares the column store output row-by-row against an independent plain Python reference for the same matric number and prints a sample of matched rows. The test suite defaults to `U2220031B`, but you can override it at runtime with `TEST_MATRIC`.
+`TestGroundTruth` compares column store output row-by-row against an independent plain Python reference. Defaults to `U2220031B`, override with `TEST_MATRIC`.
 
 ## Project Structure
 
@@ -63,10 +61,10 @@ columnstore/
   metrics.py                    Metrics enum
   encoding/
     base.py                     FieldEncoder base class
-    identifiers.py              Identifier encoders such as block IDs
+    identifiers.py              HDB block ID encoder
     primitives.py               Float32, FixedString, UInt16 encoders
     categorical.py              Categorical encoders (town, flat type, street name, etc.)
-    temporal.py                 Month encoders
+    temporal.py                 Month encoder
 tests/
   test_result.py                Integration tests
   ground_truth.py               Plain Python reference implementation for result verification
