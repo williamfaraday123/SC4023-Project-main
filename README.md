@@ -18,19 +18,19 @@ python main.py ResalePricesSingapore.csv $MATRIC_NUMBER
 python main.py ResalePricesSingapore.csv $MATRIC_NUMBER --analysis
 ```
 
-The `--analysis` flag runs additional demos after generating the ScanResult CSV. It compares block read counts across filter permutations (with and without zone maps), shared scans, and vector-at-a-time processing.
+The `--analysis` flag runs additional demos after generating the ScanResult CSV. It compares page read counts across filter permutations (with and without zone maps), shared scans, and vector-at-a-time processing.
 
 ## Query execution
 
-Each column is stored in 4KB blocks on disk. Filters run in a fixed order chosen to skip as many blocks as possible before touching disk:
+Each column is stored in 4KB pages on disk. Filters run in a fixed order chosen to skip as many pages as possible before touching disk:
 
-1. **Month** — a per-block min/max index records which month range each block covers. Blocks outside the target range are skipped entirely without a disk read.
-2. **Town** — a per-block bitmask (one bit per town) records which towns appear in each block. Blocks with no overlap with the target towns are skipped by checking the bitmask only.
-3. **Area** — requires reading actual floor area values from disk. Applied last, after the two cheaper filters have reduced the number of blocks to scan.
+1. **Month** — a per-page min/max index records which month range each page covers. Pages outside the target range are skipped entirely without a disk read.
+2. **Town** — a per-page bitmask (one bit per town) records which towns appear in each page. Pages with no overlap with the target towns are skipped by checking the bitmask only.
+3. **Area** — requires reading actual floor area values from disk. Applied last, after the two cheaper filters have reduced the number of pages to scan.
 
-Data is sorted by (month, town, area) at load time to cluster related records into the same blocks, maximising the effectiveness of the above skips.
+Data is sorted by (month, town, area) at load time to cluster related records into the same pages, maximising the effectiveness of the above skips.
 
-The ground truth implementation in `tests/ground_truth.py` runs the same query as a plain Python loop over the raw CSV — no index, no zone maps, no block structure, every row examined. Both approaches must produce identical results.
+The ground truth implementation in `tests/ground_truth.py` runs the same query as a plain Python loop over the raw CSV — no index, no zone maps, no page structure, every row examined. Both approaches must produce identical results.
 
 ## Output
 
@@ -53,7 +53,7 @@ pytest -v -s tests/test_result.py::TestGroundTruth
 ```
 main.py                         Entry point
 columnstore/
-  storage.py                    DiskColumnStore (disk-based column store)
+  storage.py                    DiskColumnStore (page-based column store)
   engine.py                     ScanEngine (filtering, statistics, scan result generation)
   catalog.py                    Town/flat type/model constants
   errors.py                     Custom exceptions

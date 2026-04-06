@@ -5,15 +5,22 @@ import math
 from columnstore.encoding.base import FieldEncoder
 from columnstore.errors import StorageError
 
-BLOCK_SIZE = 4096
+PAGE_SIZE = 4096
+
+MONTH_COL = 0
+TOWN_COL = 1
+AREA_COL = 6
+
+MONTH_INDEX_OFFSET = 24168
+MONTH_INDEX_SIZE = 144
 
 
 class DiskColumnStore:
     """
-    Disk-based column-oriented storage system for structured data.
+    Disk-based column store for structured data.
     Each column is stored in its own file, with records inserted column-wise.
     Supports zone maps for town (bitmask) and area (min/max) columns,
-    and a block-level index for the month column.
+    and a page-level index for the month column.
     """
 
     def __init__(
@@ -43,20 +50,19 @@ class DiskColumnStore:
         self.read_pointers = [None] * len(columns)
         self.read_buffers = [b""] * len(columns)
 
-        # Zone map for town column (bitmask per block)
+        # Zone map for town column (bitmask per page)
         self.town_zone_map = []
         self._town_zmap_val = 0
 
-        # Zone map for floor_area_sqm column (min/max per block)
+        # Zone map for floor_area_sqm column (min/max per page)
         self._area_zmap_min = math.inf
         self._area_zmap_max = -math.inf
         self.area_zone_map = []
 
-        # Block-level index for the month column.
-        # Each entry is a set of block numbers containing that month.
+        # Page-level index for the month column.
+        # Each entry is a set of page numbers containing that month.
         # Covers Jan 2015 (encoded 24180) to Dec 2026 (encoded 24323).
-        # Offset by 24168 so index 0 = encoded value 24168.
-        self.month_index = [set() for _ in range(144)]
+        self.month_index = [set() for _ in range(MONTH_INDEX_SIZE)]
 
     def clear_disk(self) -> None:
         self.flush_write_buffers()
@@ -77,13 +83,13 @@ class DiskColumnStore:
         if self.write_buffers[i] == b"":
             return
 
-        self.write_pointers[i].write(self.write_buffers[i].ljust(BLOCK_SIZE, b"\x00"))
+        self.write_pointers[i].write(self.write_buffers[i].ljust(PAGE_SIZE, b"\x00"))
         self.write_buffers[i] = b""
 
-        if i == 1:
+        if i == TOWN_COL:
             self.town_zone_map.append(self._town_zmap_val)
             self._town_zmap_val = 0
-        elif i == 6:
+        elif i == AREA_COL:
             self.area_zone_map.append((self._area_zmap_min, self._area_zmap_max))
             self._area_zmap_min = math.inf
             self._area_zmap_max = -math.inf
@@ -95,81 +101,81 @@ class DiskColumnStore:
 
     def print_storage_stats(self) -> None:
         row_format = "{:>20} {:>15}"
-        print(row_format.format("Column", "Blocks"))
+        print(row_format.format("Column", "Pages"))
         total = 0
         for column in self.columns:
-            size = os.path.getsize(column) // BLOCK_SIZE
+            size = os.path.getsize(column) // PAGE_SIZE
             print(row_format.format(os.path.basename(column)[1:], size))
             total += size
         print(row_format.format("Total", total))
 
-    def add_entry(self, tokens: list[str]) -> None:
-        if len(tokens) != len(self.encoders):
+    def add_entry(self, values: list[str]) -> None:
+        if len(values) != len(self.encoders):
             raise StorageError(
-                f"Expected {len(self.encoders)} tokens, got {len(tokens)}."
+                f"Expected {len(self.encoders)} values, got {len(values)}."
             )
 
         for pos in self.critical:
-            if not tokens[pos]:
+            if not values[pos]:
                 raise StorageError(f"Expected attribute {pos} to be non-empty.")
 
         try:
-            for i in range(len(tokens)):
-                tokens[i] = self.encoders[i].encode(tokens[i])
+            for i in range(len(values)):
+                values[i] = self.encoders[i].encode(values[i])
         except Exception as e:
             raise StorageError(f"Unable to store row due to error: {str(e)}")
 
         if not self.basic:
-            self._area_zmap_min = min(self._area_zmap_min, tokens[6])
-            self._area_zmap_max = max(self._area_zmap_max, tokens[6])
-            self._town_zmap_val |= 1 << tokens[1]
+            self._area_zmap_min = min(self._area_zmap_min, values[AREA_COL])
+            self._area_zmap_max = max(self._area_zmap_max, values[AREA_COL])
+            self._town_zmap_val |= 1 << values[TOWN_COL]
 
         self.size += 1
-        for i in range(len(tokens)):
-            packed = self.encoders[i].serialize(tokens[i])
+        for i in range(len(values)):
+            packed = self.encoders[i].serialize(values[i])
 
-            if len(self.write_buffers[i]) + self.encoders[i].byte_width() > BLOCK_SIZE:
+            if len(self.write_buffers[i]) + self.encoders[i].byte_width() > PAGE_SIZE:
                 self._flush_write_buffer(i)
 
             self.write_buffers[i] += packed
 
         if not self.basic:
-            self.month_index[tokens[0] - 24168].add(
-                self.write_pointers[0].tell() // BLOCK_SIZE
+            self.month_index[values[MONTH_COL] - MONTH_INDEX_OFFSET].add(
+                self.write_pointers[0].tell() // PAGE_SIZE
             )
 
     def get_size(self) -> int:
         return self.size
 
-    def _pos_to_block(self, pos: int, i: int) -> int:
-        items_per_page = BLOCK_SIZE // self.encoders[i].byte_width()
+    def _pos_to_page(self, pos: int, i: int) -> int:
+        items_per_page = PAGE_SIZE // self.encoders[i].byte_width()
         return pos // items_per_page
 
-    def _get_zonemap_item(self, pos: int, i: int, zmap: list):
-        return zmap[self._pos_to_block(pos, i)]
+    def _get_zone_map_entry(self, pos: int, i: int, zmap: list):
+        return zmap[self._pos_to_page(pos, i)]
 
     def get_item(self, pos: int, i: int):
-        """Retrieves the decoded value from column i at position pos, loading the block if needed."""
-        block_number = self._pos_to_block(pos, i)
+        """Retrieves the decoded value from column i at position pos, loading the page if needed."""
+        page_number = self._pos_to_page(pos, i)
         if self.read_pointers[i] is None:
             self.read_pointers[i] = open(self.columns[i], "rb")
 
-        # Only read from disk if the requested block is not already buffered.
-        # tell() == (block+1)*BLOCK_SIZE means we just finished reading that block.
-        if self.read_pointers[i].tell() != (block_number + 1) * BLOCK_SIZE:
+        # Only read from disk if the requested page is not already buffered.
+        # tell() == (page+1)*PAGE_SIZE means we just finished reading that page.
+        if self.read_pointers[i].tell() != (page_number + 1) * PAGE_SIZE:
             self.reads += 1
-            self.read_pointers[i].seek(block_number * BLOCK_SIZE)
-            self.read_buffers[i] = self.read_pointers[i].read(BLOCK_SIZE)
+            self.read_pointers[i].seek(page_number * PAGE_SIZE)
+            self.read_buffers[i] = self.read_pointers[i].read(PAGE_SIZE)
 
-        bw = self.encoders[i].byte_width()
-        items_per_page = BLOCK_SIZE // bw
-        start = (pos % items_per_page) * bw
-        return self.encoders[i].deserialize(self.read_buffers[i][start : start + bw])
+        byte_width = self.encoders[i].byte_width()
+        items_per_page = PAGE_SIZE // byte_width
+        start = (pos % items_per_page) * byte_width
+        return self.encoders[i].deserialize(self.read_buffers[i][start : start + byte_width])
 
-    def get_pos_in_block(self, block: int, i: int) -> range:
-        bw = self.encoders[i].byte_width()
-        items_per_page = BLOCK_SIZE // bw
-        start = block * items_per_page
+    def get_pos_in_page(self, page: int, i: int) -> range:
+        byte_width = self.encoders[i].byte_width()
+        items_per_page = PAGE_SIZE // byte_width
+        start = page * items_per_page
         return range(start, start + items_per_page)
 
     # Column accessors
@@ -195,18 +201,18 @@ class DiskColumnStore:
         return self.get_item(pos, 9)
 
     # Zone map / index accessors
-    def get_town_zmap_entry(self, pos: int) -> int:
-        return self._get_zonemap_item(pos, 1, self.town_zone_map)
+    def get_town_zone_map_entry(self, pos: int) -> int:
+        return self._get_zone_map_entry(pos, TOWN_COL, self.town_zone_map)
 
-    def get_area_zmap_entry(self, pos: int) -> tuple[float, float]:
-        return self._get_zonemap_item(pos, 6, self.area_zone_map)
+    def get_area_zone_map_entry(self, pos: int) -> tuple[float, float]:
+        return self._get_zone_map_entry(pos, AREA_COL, self.area_zone_map)
 
     def pos_has_month_in_range(self, pos: int, month_start: int, month_end: int) -> bool:
-        block_number = self._pos_to_block(pos, 0)
-        idx_start = month_start - 24168
-        idx_end = month_end - 24168
+        page_number = self._pos_to_page(pos, MONTH_COL)
+        idx_start = month_start - MONTH_INDEX_OFFSET
+        idx_end = month_end - MONTH_INDEX_OFFSET
         for month in range(idx_start, min(idx_end + 1, len(self.month_index))):
-            if block_number in self.month_index[month]:
+            if page_number in self.month_index[month]:
                 return True
         return False
 

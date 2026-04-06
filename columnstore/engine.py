@@ -59,11 +59,11 @@ class ScanEngine:
         result = []
         for pos in positions:
             if use_zone_map:
-                zval = self.store.get_town_zmap_entry(pos)
+                zval = self.store.get_town_zone_map_entry(pos)
                 if not (zval & (1 << town)):
                     continue
-            t = self.store.get_town(pos)
-            if t == town:
+            town_val = self.store.get_town(pos)
+            if town_val == town:
                 result.append(pos)
         return result
 
@@ -72,7 +72,7 @@ class ScanEngine:
         result = []
         for pos in positions:
             if use_zone_map:
-                _, zmax = self.store.get_area_zmap_entry(pos)
+                _, zmax = self.store.get_area_zone_map_entry(pos)
                 if zmax < min_area:
                     continue
             sqm = self.store.get_floor_area_sqm(pos)
@@ -95,7 +95,7 @@ class ScanEngine:
                                  use_zone_map: bool, use_index: bool,
                                  month_span: int = 2, min_area: int = 80) -> None:
         row_format = "{:>20} {:>20}"
-        print(row_format.format("Permutation", "Blocks"))
+        print(row_format.format("Permutation", "Pages"))
 
         data_range = range(self.store.get_size())
         permutations = list(itertools.permutations(["month", "town", "area"]))
@@ -215,7 +215,7 @@ class ScanEngine:
 
     def shared_scan(self, start_month: int, town: int,
                     month_span: int = 2, min_area: int = 80) -> None:
-        """Single pass computing all statistics to minimize block reads."""
+        """Single pass computing all statistics to minimize page reads."""
         self.store.clear_read_state()
         positions = self.apply_filters(start_month, town, 0, self.store.get_size(), month_span, min_area)
 

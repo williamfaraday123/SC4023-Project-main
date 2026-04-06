@@ -51,7 +51,7 @@ class BlockIdEncoder(FieldEncoder):
     """Encodes block identifiers like '123' or '123A' into a 3-byte compact format."""
 
     def __init__(self):
-        self._pattern = re.compile(r"[0-9]+[A-Z]?")
+        self._pattern = re.compile(r"^[0-9]+[A-Z]?$")
 
     def byte_width(self) -> int:
         return 3

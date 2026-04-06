@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("csv_path", help="Path to ResalePricesSingapore.csv")
     parser.add_argument("matric", help="Matriculation number (e.g., U2220031B)")
     parser.add_argument("--analysis", action="store_true",
-                        help="Run demo analysis with block read counts")
+                        help="Run demo analysis with page read counts")
     return parser.parse_args()
 
 
@@ -109,14 +109,14 @@ def run_analysis(store: DiskColumnStore, start_month: int, town_encoded: int, ma
 
     print("\n---------SHARED SCANS---------")
     engine.shared_scan(start_month, town_encoded)
-    print(f"{store.reads} block reads")
+    print(f"{store.reads} page reads")
     print(engine.get_results())
 
     engine.clear_results()
 
     print("\n---------VECTOR AT A TIME---------")
     engine.vector_a_time(start_month, town_encoded)
-    print(f"{store.reads} block reads")
+    print(f"{store.reads} page reads")
     print(engine.get_results())
 
 
