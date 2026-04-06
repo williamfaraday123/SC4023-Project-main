@@ -12,7 +12,7 @@ from columnstore.catalog import (
 from columnstore.encoding import (
     MonthEncoder, TownEncoder, FlatTypeEncoder, BlockIdEncoder,
     FixedStringEncoder, StoreyRangeEncoder, Float32Encoder,
-    FlatModelEncoder, UInt16Encoder,
+    FlatModelEncoder, UInt16Encoder, StreetNameEncoder,
 )
 
 
@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("csv_path", help="Path to ResalePricesSingapore.csv")
     parser.add_argument("matric", help="Matriculation number (e.g., U2220031B)")
     parser.add_argument("--analysis", action="store_true",
-                        help="Run demo analysis with block read counts")
+                        help="Run demo analysis with page read counts")
     return parser.parse_args()
 
 
@@ -34,10 +34,9 @@ def parse_matric(matric: str):
     if not re.match(pattern, matric):
         raise ValueError("Invalid Matric format. Should be A1234567B")
 
-    # Target year: last digit + 2010, wrap to 2020s if before 2014
-    year = int(matric[-2]) + 2010
-    if year < 2014:
-        year += 10
+    # Target year: 0-4 map to 2020-2024, 5-9 map to 2015-2019
+    year_digit = int(matric[-2])
+    year = 2020 + year_digit if year_digit <= 4 else 2010 + year_digit
 
     # Starting month: second-last digit maps 1-9 directly, 0 means October
     month_digit = int(matric[-3])
@@ -61,17 +60,21 @@ def parse_matric(matric: str):
     return year, start_month, town_names
 
 
-def build_store(csv_path: str, encoders: list, critical: list,
-                sort: bool = False, basic: bool = False):
-    """Loads CSV data into a DiskColumnStore. Optionally sorts by (month, town, area)."""
+def load_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
+    """Reads the CSV and returns (column_names, rows)."""
     with open(csv_path, "r", newline="") as f:
         reader = csv.reader(f)
         columns = next(reader)
         rows = list(reader)
+    return columns, rows
 
+
+def build_store(columns: list[str], rows: list[list[str]], encoders: list, critical: list,
+                sort: bool = False, basic: bool = False):
+    """Loads rows into a DiskColumnStore. Optionally sorts by (month, town, area)."""
     # Sort by (month, town, floor_area) to improve zone map effectiveness
     if sort:
-        rows.sort(key=lambda row: (row[0], row[1], row[6]))
+        rows = sorted(rows, key=lambda row: (row[0], row[1], row[6]))
 
     store = DiskColumnStore(columns=columns, encoders=encoders, critical=critical, basic=basic)
     for row in rows:
@@ -105,14 +108,14 @@ def run_analysis(store: DiskColumnStore, start_month: int, town_encoded: int, ma
 
     print("\n---------SHARED SCANS---------")
     engine.shared_scan(start_month, town_encoded)
-    print(f"{store.reads} block reads")
+    print(f"{store.reads} page reads")
     print(engine.get_results())
 
     engine.clear_results()
 
     print("\n---------VECTOR AT A TIME---------")
     engine.vector_a_time(start_month, town_encoded)
-    print(f"{store.reads} block reads")
+    print(f"{store.reads} page reads")
     print(engine.get_results())
 
 
@@ -171,7 +174,10 @@ def generate_scan_result(store: DiskColumnStore, matric: str,
             "Floor_Area", "Flat_Model", "Lease_Commence_Date",
             "Price_Per_Square_Meter",
         ])
-        writer.writerows(rows)
+        if rows:
+            writer.writerows(rows)
+        else:
+            writer.writerow(["No result", "", "", "", "", "", "", "", ""])
 
     print(f"\nScanResult written to {output_path} ({len(rows)} records)")
 
@@ -185,6 +191,11 @@ if __name__ == "__main__":
     print(f"Year: {year}, Towns: {town_names}")
     print("Loading data...")
 
+    columns, rows = load_csv(args.csv_path)
+
+    # Build street name dictionary from the data (column index 4)
+    street_names = sorted(set(row[4] for row in rows))
+
     # Encoders for the compressed column store
     month_enc = MonthEncoder()
     float_enc = Float32Encoder()
@@ -195,7 +206,7 @@ if __name__ == "__main__":
         TownEncoder(ALL_TOWNS),                 # 1: town
         FlatTypeEncoder(ALL_FLAT_TYPES),         # 2: flat_type
         BlockIdEncoder(),                       # 3: block
-        FixedStringEncoder(20),                 # 4: street_name
+        StreetNameEncoder(street_names),        # 4: street_name (dictionary encoded)
         StoreyRangeEncoder(ALL_STOREY_RANGES),  # 5: storey_range
         float_enc,                              # 6: floor_area_sqm
         FlatModelEncoder(ALL_FLAT_MODELS),       # 7: flat_model
@@ -220,12 +231,12 @@ if __name__ == "__main__":
         short_enc,               # lease_commence_date
         float_enc,               # resale_price
     ]
-    basic_store = build_store(args.csv_path, basic_encoders, critical, basic=True)
+    basic_store = build_store(columns, rows, basic_encoders, critical, basic=True)
     basic_store.print_storage_stats()
     basic_store.clear_disk()
 
     # Build compressed sorted store
-    store = build_store(args.csv_path, compressed_encoders, critical, sort=True)
+    store = build_store(columns, rows, compressed_encoders, critical, sort=True)
 
     # Generate the required ScanResult CSV
     generate_scan_result(store, args.matric, start_month, town_names)

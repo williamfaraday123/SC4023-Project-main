@@ -40,3 +40,8 @@ class FlatModelEncoder(CategoricalEncoder):
 
 class StoreyRangeEncoder(CategoricalEncoder):
     pass
+
+
+class StreetNameEncoder(CategoricalEncoder):
+    """Encodes street names to integer indices built dynamically from the dataset."""
+    pass

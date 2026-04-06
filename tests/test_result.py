@@ -5,10 +5,13 @@ import subprocess
 
 import pytest
 
+from tests.ground_truth import compute_ground_truth
+
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(PROJECT_ROOT, "ResalePricesSingapore.csv")
 MAIN_PY = os.path.join(PROJECT_ROOT, "main.py")
+TEST_MATRIC = os.environ.get("TEST_MATRIC", "U2220031B")
 
 
 def run_main(matric: str, analysis: bool = False):
@@ -30,8 +33,8 @@ def read_scan_result(matric: str) -> list[dict]:
 @pytest.fixture(scope="session")
 def scan_rows():
     """Run main.py once and return the parsed ScanResult rows for all tests."""
-    run_main("U2220031B")
-    rows = read_scan_result("U2220031B")
+    run_main(TEST_MATRIC)
+    rows = read_scan_result(TEST_MATRIC)
     yield rows
     for f in glob.glob(os.path.join(PROJECT_ROOT, "ScanResult_*.csv")):
         try:
@@ -90,6 +93,47 @@ class TestScanResultFormat:
 
 class TestAnalysisMode:
     def test_analysis_flag_produces_output(self):
-        result = run_main("U2220031B", analysis=True)
+        result = run_main(TEST_MATRIC, analysis=True)
         assert "COMPRESSED STORE" in result.stdout
         assert "SHARED SCANS" in result.stdout
+
+
+class TestGroundTruth:
+    def test_matches_ground_truth(self, scan_rows):
+        """Compare column store output against a plain Python reference implementation."""
+        expected = compute_ground_truth(CSV_PATH, TEST_MATRIC)
+        assert len(scan_rows) == len(expected), (
+            f"Row count mismatch: column store={len(scan_rows)}, reference={len(expected)}"
+        )
+        for exp, got in zip(expected, scan_rows):
+            assert exp == got
+
+        def fmt(src, idx, e):
+            return (
+                f"  {src}[{idx:>3}]  "
+                f"{e['(x, y)']:<9} "
+                f"{e['Year']:<6} "
+                f"{e['Month']:<7} "
+                f"{e['Town']:<22} "
+                f"{e['Block']:<8} "
+                f"{e['Floor_Area']:<10} "
+                f"{e['Flat_Model']:<22} "
+                f"{e['Lease_Commence_Date']:<6} "
+                f"{e['Price_Per_Square_Meter']:>10}"
+            )
+
+        sample = list(zip(expected, scan_rows))
+        header = (
+            f"  {'src':>6}   {'(x,y)':<9} {'Year':<6} {'Month':<7} {'Town':<22} "
+            f"{'Block':<8} {'Area':<10} {'Flat_Model':<22} {'Lease':<6} {'Price/sqm':>10}"
+        )
+        divider = "-" * len(header)
+        print(f"\n=== Ground truth vs column store (first 5 / last 5 of {len(expected)} rows) ===")
+        print(header)
+        print(divider)
+        for i, (exp, got) in enumerate(sample[:5] + sample[-5:]):
+            if i == 5:
+                print(divider)
+            idx = i + 1 if i < 5 else len(expected) - 4 + (i - 5)
+            print(fmt("GT", idx, exp))
+            print(fmt("CS", idx, got))
