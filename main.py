@@ -34,10 +34,9 @@ def parse_matric(matric: str):
     if not re.match(pattern, matric):
         raise ValueError("Invalid Matric format. Should be A1234567B")
 
-    # Target year: last digit + 2010, wrap to 2020s if before 2014
-    year = int(matric[-2]) + 2010
-    if year < 2014:
-        year += 10
+    # Target year: 0-4 map to 2020-2024, 5-9 map to 2015-2019
+    year_digit = int(matric[-2])
+    year = 2020 + year_digit if year_digit <= 4 else 2010 + year_digit
 
     # Starting month: second-last digit maps 1-9 directly, 0 means October
     month_digit = int(matric[-3])

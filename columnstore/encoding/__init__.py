@@ -4,4 +4,5 @@ from columnstore.encoding.categorical import (
     CategoricalEncoder, TownEncoder, FlatTypeEncoder,
     FlatModelEncoder, StoreyRangeEncoder, StreetNameEncoder,
 )
-from columnstore.encoding.temporal import MonthEncoder, BlockIdEncoder
+from columnstore.encoding.temporal import MonthEncoder
+from columnstore.encoding.identifiers import BlockIdEncoder

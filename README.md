@@ -42,11 +42,14 @@ The ground truth implementation in `tests/ground_truth.py` runs the same query a
 # Run all tests
 pytest -v tests/
 
+# Run tests for a specific matric number
+TEST_MATRIC=U2220031B pytest -v tests/
+
 # Run ground truth comparison with printed output
 pytest -v -s tests/test_result.py::TestGroundTruth
 ```
 
-`TestGroundTruth` compares the column store output row-by-row against the plain Python reference for the same matric number and prints a sample of matched rows.
+`TestGroundTruth` compares the column store output row-by-row against an independent plain Python reference for the same matric number and prints a sample of matched rows. The test suite defaults to `U2220031B`, but you can override it at runtime with `TEST_MATRIC`.
 
 ## Project Structure
 
@@ -60,9 +63,10 @@ columnstore/
   metrics.py                    Metrics enum
   encoding/
     base.py                     FieldEncoder base class
+    identifiers.py              Identifier encoders such as block IDs
     primitives.py               Float32, FixedString, UInt16 encoders
     categorical.py              Categorical encoders (town, flat type, street name, etc.)
-    temporal.py                 Month and block ID encoders
+    temporal.py                 Month encoders
 tests/
   test_result.py                Integration tests
   ground_truth.py               Plain Python reference implementation for result verification

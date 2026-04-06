@@ -1,12 +1,37 @@
 import csv
 import math
-import sys
 import os
+import re
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from main import parse_matric
+from columnstore.catalog import MATRIC_DIGIT_TO_TOWN
 from columnstore.encoding.temporal import MonthEncoder
+
+
+def parse_matric_reference(matric: str) -> tuple[int, int, list[str]]:
+    """Independent implementation of the project brief's matric parsing rules."""
+    if not re.fullmatch(r"[A-Z][0-9]{7}[A-Z]", matric):
+        raise ValueError("Invalid Matric format. Should be A1234567B")
+
+    year_digit = int(matric[-2])
+    year = 2020 + year_digit if year_digit <= 4 else 2010 + year_digit
+
+    month_digit = int(matric[-3])
+    month_number = 10 if month_digit == 0 else month_digit
+
+    month_enc = MonthEncoder()
+    month_str = month_enc.MONTH_NAMES[month_number - 1]
+    start_month = month_enc.encode(f"{month_str}-{str(year % 100).zfill(2)}")
+
+    seen = set()
+    town_names = []
+    for ch in matric:
+        if ch.isdigit():
+            name = MATRIC_DIGIT_TO_TOWN[int(ch)]
+            if name not in seen:
+                seen.add(name)
+                town_names.append(name)
+
+    return year, start_month, town_names
 
 
 def compute_ground_truth(csv_path: str, matric: str) -> list[dict]:
@@ -15,7 +40,7 @@ def compute_ground_truth(csv_path: str, matric: str) -> list[dict]:
     Runs the same query directly on the raw CSV using plain Python, with no column store.
     Returns a list of dicts matching the ScanResult CSV format.
     """
-    _, start_month_enc, town_names = parse_matric(matric)
+    _, start_month_enc, town_names = parse_matric_reference(matric)
     town_set = set(town_names)
     month_enc = MonthEncoder()
 
