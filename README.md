@@ -54,7 +54,7 @@ pytest -v -s tests/test_result.py::TestGroundTruth
 ```
 main.py                         Entry point
 columnstore/
-  storage.py                    DiskColumnStore (page-based column store)
+  storage.py                    Disk storage layer
   engine.py                     ScanEngine (filtering, statistics, scan result generation)
   catalog.py                    Town/flat type/model constants
   errors.py                     Custom exceptions
